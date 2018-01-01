@@ -6,12 +6,12 @@ decodes "hunks" from Amiga Executable files and dumps information about them to
 outfile (or stdout if no outfile is provided).  It was written to examine the hidden 
 files from the Kickstart 1.0 and Kickstart 1.1 disks, it's either very detailed 
 (if you define DEBUG as 1 in this file or use the -d switch on the command line)
-or quite detailed (if DEBUG is 0 and you don't use the -v switch) in its output.
+or quite detailed (if DEBUG is 0 and you don't use the -d switch) in its output.
 
 It will decode the hunks and if debug is enabled do a hexdump and a string search
 within the binary as well as well as output more information about the progress.
 The string search currently supports regular ascii strings and will also try to 
-rot13 the data and see if there are rot13 "encrypted" strings to 
+rot13 the data and see if there are rot13 "encrypted" strings too 
 
 The string finder finds any 3 ascii values strung together, and is pretty good at finding
 strings as well (although it has lots of false positives, i.e. it finds things that are
@@ -167,8 +167,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Helper function that prints out usage information
 void usage(char *programname) {
 	fprintf(stderr,"This is objectexaminer V0.2 (C) 2011-2013 Sigurbjorn B. Larusson\n");
-	fprintf(stderr,"Usage: %s [-d] [-o <outputfilename>] <inputfilename>\n\n",programname);
+	fprintf(stderr,"Usage: %s [-d] [-i] [-o <outputfilename>] <inputfilename>\n\n",programname);
 	fprintf(stderr,"-d, will enable the debug option, which will print out a lot more information\n\n");
+	fprintf(stderr,"-i will ignore the magic number of the file, potentially useful for partial files.\n");
 	fprintf(stderr,"-o will output to a file instead of the screen.\n");
 	fprintf(stderr,"\tIf you specify -o you must also specify a path to the output file\n\n");
 	fprintf(stderr,"You must then specify the input file (an AmigaDOS object file) to be parsed.\n");
@@ -354,6 +355,8 @@ int main(int argc,char **argv) {
 	// Int to store the value of debug, set to the value of the defined value for DEBUG, can be
 	// overriden with the -d command line argument
 	uint8_t	debug = DEBUG;
+	// Int to store the value of ignoremagic, if set, the magic number of the file is ignored (can be useful for partial files or files that are object files but not executables)
+	uint8_t ignoremagic = 0;
 	// Int to store the current offset in the file
 	uint32_t offset = 0;
 	// Int to temporarily store hunklength
@@ -383,7 +386,7 @@ int main(int argc,char **argv) {
 	char optionflag;	
 
 	// Read the passed options if any (-d sets debug, -o sets an optional filename to pipe the output to)
-	while((optionflag = getopt(argc, argv, "do:")) != -1) {
+	while((optionflag = getopt(argc, argv, "dio:")) != -1) {
 		switch(optionflag) {
 			// Debug flag is set to on
 			case 'd':
@@ -400,6 +403,10 @@ int main(int argc,char **argv) {
 					// Announce that we're writing the output to a file on stdout
 					fprintf(stdout,"Writing output to %s\n",optarg);
 				}
+				break;
+			// Ignore magic number 
+			case 'i':
+				ignoremagic=1;
 				break;
 			// Missing argument to o
 			case '?':
@@ -459,8 +466,8 @@ int main(int argc,char **argv) {
 	if(debug) 
 		fprintf(outfile,"\tMagic number is %x\n",magicnumber);
 
-	// Check if the magic number is 3f3
-	if(magicnumber == MAGIC) {
+	// Check if the magic number is 3f3 or if ignoremagic is set
+	if(magicnumber == MAGIC || ignoremagic) {
 		// This is a valid AmigaDOS executable file, next we skip the 8th byte of the file and read another 4 bytes
 		// these 4 bytes contain the total number of hunks in this object file
 		fseek(file,offset,SEEK_SET);
@@ -544,11 +551,12 @@ int main(int argc,char **argv) {
 			// Get the hunklength according to the hunk header
 			hunklength = msb_bytearray_to_int32(tempbytearray) * 4;
 		
-			if(debug)
+			if(debug) {
 				fprintf(outfile,"\tHunk length according to hunk header is %d bytes\n",hunklength);
+				fprintf(outfile,"\tHunk length according to the file header is %d bytes\n",length[i]);
+			}
 
 			// Check for length mismatch
-
 			if(hunklength != length[i]) {
 				fprintf(stderr,"\tHunk length mismatch, program header says %d bytes, hunkheader says %d bytes, using hunkheader!\n",hunklength,length[i]);
 				length[i] = hunklength;
@@ -676,6 +684,7 @@ int main(int argc,char **argv) {
 					break;
 	
 				case HUNK_BSS:
+					length[i]=8;	
 					fprintf(outfile,"\tFound Hunk of type HUNK_BSS, length is %d\n",length[i]);
 					fprintf(outfile,"\tParsing hunk data:\n");
 					fprintf(outfile,"\tSearching for and dumping strings in the hunk\n");
@@ -980,13 +989,14 @@ int main(int argc,char **argv) {
 					fprintf(outfile,"\n");
 				}
 			}
-			// And by this point, we should be at the end hunk, if not, there is something broken!
+			// And by this point, we should be at the end hunk, if not, there is a chance that the end hunk is missing, it's not illegal to skip the end chunk although it is considered poor form (except at the end of the file, there the end hunk must exist)
+			fprintf(outfile,"\tCurrent file offset is %d out of %d bytes\n",offset,filelength);
 			if(hunktype != HUNK_END) {
-				fprintf(stderr,"\tHunk is not the expected type, expected end, found %X\n",hunktype);
-				// Let this be the last iteration of this loop
-				break;
+				fprintf(stderr,"\tHunk is not the expected type, expected end, found %#010x, it might be missing which is poor form but not illegal\n",hunktype);
+				offset-=8;
 			}
 
+			fprintf(outfile,"\tCurrent file offset is %d out of %d bytes\n",offset,filelength);
 			if(debug)
 				fprintf(outfile,"\tCurrent file offset is %d out of %d bytes\n",offset,filelength);
 
