@@ -416,6 +416,8 @@ int main(int argc,char **argv) {
 				// Leave this sector
 				break;
 			case T_DATA:
+				if(ntohl(sector[i].hdr.header_key % 32 != 0))
+					continue;
 				header_key = ntohl(sector[i].hdr.header_key);
 				if (header_key<SECTORS && ntohl(sector[header_key].hdr.type) == T_HEADER) {
 					if(debug) {
