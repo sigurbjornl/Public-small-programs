@@ -31,6 +31,7 @@
  *    * It now tries to extract the original filename as well as the parent filename before making up a filename
  *    * It also tries to place them in their respective directories
  *    * It now creates files when parsing the headers, so even files that have no recoverable data get created and you know where they would have been placed in the hierarchy
+ *      This has one fairly annoying drawback
  * Added a much better ascii/hexdumper function which now dumps both ascii and hex, 20 characters per line (20 ascii characters + FF format for the hex codes) 
  * Added many additional segmentation checks and cleaned up the memory allocation, it should be fairly rare for this utility to crash now, even with badly mangled filesystems
  * TODO:
@@ -390,14 +391,21 @@ int main(int argc,char **argv) {
 				}
 				// Here we "touch" the file name this header belongs to, to create the file on the filesystem, in some cases there are no surviving data entries in which case
 				// the file won't be created, since we want to know about every file that is there, even if none of it is recoverable, we'll create the file here
-				// Note that there is a good chance that the object is not a file, but another directory, in which case you'll find another orphaned directory with the same name as the file
-				// at the root, if you have ideas how this could be puzzled together please fix this code and throw me an email
-				// This however makes the work of puzzling together the structure relatively easy
-				f = fopen(sector[i].fh.filename, "r+"); /* try to open existing file, if it already exists we won't need to creqte it */
-				if (!f) 
-					f = fopen(sector[i].fh.filename, "w"); /* doesn't exist, so create */
-				// Close the file again
-				fclose(f);
+				// First we check whether the entry is 0 bytes, if it is, then it's very likely that it's a directory entry and not a file entry
+				// If it really is a file entry, and it is 0 bytes, and it is orphaned, then we're out of luck, if the file is okay (even though it's 0 bytes), it will be created later 
+				// This should hopefully make the work of puzzling together the structure relatively easy
+				if(ntohl(sector[i].fh.byte_size) == 0) {
+					// Make a directory for this entry instead
+					if(mkdir(sector[i].fh.filename,0777) < 0 && errno != EEXIST) 
+						fprintf(stderr,"Can't create directory %s\n",sector[i].fh.filename);
+				} else {
+					// Make a file for this entry (empty)
+					f = fopen(sector[i].fh.filename, "r+"); /* try to open existing file, if it already exists we won't need to creqte it */
+					if (!f) 
+						f = fopen(sector[i].fh.filename, "w"); /* doesn't exist, so create */
+					// Close the file again
+					fclose(f);
+				}
 				// Return to the previous working directory
 				if(fchdir(cwd) == -1) {
 					fprintf(stderr,"Can't return to previous working directory, exiting\n");
@@ -548,11 +556,31 @@ int main(int argc,char **argv) {
 						// Change directory to the newly created directory
 						if(chdir(filepath[n]) == -1) {
 							// There is a chance, there's a filename that's the same as the name of the directory we're trying to create, 
-							// in which case this is most likely an orphaned directory, we'll create it at the root level instead
-							// Return to the previous working directory
-							if(fchdir(cwd) == -1) {
-								fprintf(stderr,"Can't return to previous working directory, exiting\n");
-								return 1;
+							// one of the options is that it's an empty file, in which case we'll just delete it because then the sector file was pointing to a directory
+							// and not a file, if the file is not empty, we'll re-create this directory in the root directory instead
+							struct stat st;
+							stat(filepath[n], &st);
+							int size = st.st_size;
+							// The file is empty, we'll delete the file and create the directory instead below...
+							if(size == 0) {
+								if(remove(filepath[n])) {
+									fprintf(outfile,"Cannot delete file %s, placing file in root path instead\n",filepath[n]);
+									// Return to the previous working directory
+									if(fchdir(cwd) == -1) {
+										fprintf(stderr,"Can't return to previous working directory, exiting\n");
+										return 1;
+									}
+								} else {
+									if(debug)
+										fprintf(outfile,"Removed stale file entry for directory %s\n",filepath[n]);	
+								}
+							// in this case this is most likely an orphaned directory, we'll create it at the root level instead
+							} else {	
+								// Return to the previous working directory
+								if(fchdir(cwd) == -1) {
+									fprintf(stderr,"Can't return to previous working directory, exiting\n");
+									return 1;
+								}
 							}
 							if(mkdir(filepath[n],0777) < 0 && errno != EEXIST) {
 								fprintf(stderr,"Can't create directory %s, exiting\n",filepath[n]);
