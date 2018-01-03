@@ -115,7 +115,6 @@ int set_interface_attribs(int fd, int speed, int old)
     tty.c_cflag &= ~CSIZE;
     tty.c_cflag &= ~CRTSCTS;    /* disable hardware flowcontrol */
     tty.c_cflag |= CS8;
-    tty.c_cflag |= CS7;
 
     tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
@@ -149,7 +148,7 @@ int main(int argc, char **argv) {
 	// Debug  Can be overwritten from command line
 	int debug = DEBUG;
 	// Char buffer to hold the bytes to transfer and to read the bytes from the file
-	char transfer_buffer[4];
+	char transfer_buffer[3];
 	char buffer[BUFFERSIZE+1];
 	// Baud rate of the serial port, can be overridden by command line arguments
 	int baud_rate = BAUDRATE;
@@ -266,7 +265,7 @@ int main(int argc, char **argv) {
 				fprintf(stdout,"Read %d bytes from file into buffer\n",readbytes);
 			// Dump as character as a hex code followed by a space
 			for(i=0;i<readbytes;i++) {
-				snprintf(transfer_buffer,sizeof(transfer_buffer),"%02X",buffer[i]);
+				snprintf(transfer_buffer,sizeof(transfer_buffer),"%02X",(unsigned char)buffer[i]);
 				// If debug is enabled pump out more information
 				if(debug)
 					fprintf(stdout,"Preparing to write %lu bytes to serial port\n",strlen(transfer_buffer));
