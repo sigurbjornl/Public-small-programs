@@ -94,6 +94,7 @@ void usage(char *programname) {
         fprintf(stderr,"\n\t-l sets the serial line to use for the transfer, default is /dev/ttyS00");
         fprintf(stderr,"\n\t-o For use with pre 1.0 (<30) version of read, this pauses for 50 ms between each sent byte (instead of 5), apparently the developers had tried to compensate");
 	fprintf(stderr,"\n\t   for these drops by making the buffer 120k (as opposed to about a kilobyte on 1.0 and later releases, but it still works very poorly");
+	fprintf(stderr,"\n\t   The .6 version of the tool actually calls forbid to prevent multitasking during the transfer, but even that doesn't fully help");
         fprintf(stderr,"\n\n\tFinally the last argument is the file to send over the serial port");
 }
 
@@ -147,6 +148,10 @@ int main(int argc, char **argv) {
 	int readbytes,writtenbytes;
 	// Debug  Can be overwritten from command line
 	int debug = DEBUG;
+	// Int to hold the size of the file
+	int filesize = 0;
+	// Int to hold the number of bytes transferred so far
+	int transferred = 0;
 	// Char buffer to hold the bytes to transfer and to read the bytes from the file
 	char transfer_buffer[3];
 	char buffer[BUFFERSIZE+1];
@@ -234,8 +239,14 @@ int main(int argc, char **argv) {
                 usage(argv[0]);
                 return 2;
         }
+	// Get the size of the file so we can't print out some progress information
+	fseek(inf, 0L, SEEK_END);
+	filesize = ftell(inf);
+	// Seek back to the start of the file
+	fseek(inf, 0L, SEEK_SET);
 
 	if(debug) {
+		fprintf(stdout,"Total size of file is %d\n",filesize);
 		fprintf(stdout,"Baud rate is set to: %d bits per second\n",baud_rate);	
 		fprintf(stdout,"Serial device to write to is set as %s\n",serial_device);
 	}
@@ -265,12 +276,16 @@ int main(int argc, char **argv) {
 				fprintf(stdout,"Read %d bytes from file into buffer\n",readbytes);
 			// Dump as character as a hex code followed by a space
 			for(i=0;i<readbytes;i++) {
+				if(!debug)
+					fprintf(stdout,"\rTransferred %d of %d bytes (%.2f percent)",transferred,filesize,(float)((float)transferred/(float)filesize)*(float)100.0);
 				snprintf(transfer_buffer,sizeof(transfer_buffer),"%02X",(unsigned char)buffer[i]);
 				// If debug is enabled pump out more information
 				if(debug)
 					fprintf(stdout,"Preparing to write %lu bytes to serial port\n",strlen(transfer_buffer));
 				// Write the bytes out to the serial port
 				writtenbytes=write(ser,transfer_buffer,2);
+				// Increment number of transferred bytes by 1
+				transferred++;
 				// If debug is enabled pump out more information
 				if(debug)
 					fprintf(stdout,"Wrote %lu bytes to serial,%s\n",strlen(transfer_buffer),transfer_buffer);
@@ -295,6 +310,10 @@ int main(int argc, char **argv) {
 			readbytes=-1;
 		}	
 	} while(readbytes != -1);
+	if(!debug) {
+		// Newline after the progress indicator
+		fprintf(stdout,"\n");
+	}
 	// And finally followed by a Q to indicate file end!
 	snprintf(transfer_buffer,sizeof(transfer_buffer),"Q");
 	writtenbytes=write(ser,transfer_buffer,1);
