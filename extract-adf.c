@@ -40,10 +40,13 @@
  * Added support for DMS files
  *    This uses a lot of code borrowed from undmz.c, (C) David Tritscher and available on Aminet http://aminet.net/package/misc/unix/undms-1.3.c
  *    It also uses header information for DMS files from http://lclevy.free.fr/amiga/DMS.txt
+ * Added support for ZIP files containing an ADF
  * Added commandline option to force treating file as a ADF file 
  * Added commandline option to force treating file as a ADZ file (gzip compressed ADF)
  * Added commandline option to force treating file as a DMS file
  * Added function to automagically determine format from file extension
+ * Added support for re-creating original file timestamps 
+ * Fixed some minor bugs
  *
  * TODO:
  * The source code could do with a cleanup and even a rewrite, I'll leave that for the next time I have time to work on it
