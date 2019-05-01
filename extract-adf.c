@@ -65,6 +65,7 @@
 	#include <zlib.h>
 #endif
 #include <assert.h>
+#include <utime.h>
 
 // These are defaults
 #define SECTORS 1760
@@ -85,9 +86,11 @@
 #define DMS_DEVICEFIX	64
 #define DMS_FILEIDBIZ	256
 
-
 // Size of zlib chunks
 #define CHUNK 0x4000
+
+// Maximum number of sectors
+#define MAX_SECTORS 3520
 
 // Set this to 1 (or anything higher) if you want debugging information printed out, this can now be set at the command line 
 #define DEBUG 0
@@ -129,9 +132,9 @@ struct fileheader {
 	uint8_t comm_len;
 	uint8_t comment[79];
 	uint8_t unused2[12];
-	uint32_t days;
-	uint32_t mins;
-	uint32_t ticks;
+	int32_t days;
+	int32_t mins;
+	int32_t ticks;
 	uint8_t name_len;
 	char filename[30];
 	uint8_t unused3;
@@ -258,6 +261,47 @@ static const unsigned char table_two[256]=
    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 };
 
+// Helper function to convert Amiga timestamp to unix timestamp
+struct tm *amigatoepoch(unsigned int amigatime,struct tm *tm) {
+
+	// Time variable for epoch at 1978-01-01
+	time_t origstamp = 252460800;
+
+	// Add to the origstampto get epoch time
+	origstamp += amigatime;
+
+	// Make tm struct from timestamp
+	tm = localtime(&origstamp);
+
+	// Return the timestruct
+	return tm;
+
+}
+
+// Helper function to convert Amiga days, minutes, ticks to timestamp
+struct utimbuf *amigadaystoutimbuf(uint32_t days, uint32_t minutes, uint32_t ticks,struct utimbuf *utim) {
+
+	// Time variable for epoch at 1978-01-01
+	time_t origstamp = 252460800;
+
+	// Div by zero check and fix for ticks
+	if(!ticks)
+		ticks=1;
+
+	// Add to the origstampto get epoch time
+	// Multiply days with 86400 seconds per day, minutes with 60 seconds, and divide the ticks by 50 (ticks per second)
+	origstamp += (time_t)(days*86400)+(minutes*60)+(ticks/50);
+
+	// Set struct mod and access times as the current timestamp
+
+	utim->actime = (time_t)origstamp;
+	utim->modtime = (time_t)origstamp;
+
+	// Return the utimstruct
+	return utim;
+
+}
+
 // DMS helper functions to calculate CRC, (C) 1998 David Tritscher
 unsigned int mycrc(unsigned char *memory, unsigned int length)
 {
@@ -312,7 +356,6 @@ int crunch_rle(unsigned char *source, unsigned char *source_end,
 
 	int rlebytes = 0;
 	int rlesaved = 0;
-	int rleloops = 0;
 
 	int totalbytes = 0;
 	int unpackedsize = 0;
@@ -1107,20 +1150,9 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 	// File descriptor for temp file
 	int fd = 0;
 
-	// To store whether this is a gzip or zip file, both of which are (annoyingly) common
-	int iszip = 0;
-	// To store the filename length for a zip file header
-	int zipfilenamelength = 0;
-	//  To store the extra header length for a zip file header
-	int zipextraheader = 0;
-
 	if(debug)
 		fprintf(debugfile,"Input filename is %s\n",inputfile);
 	
-	// Buffer used for DMS bytes in/oout	
-	unsigned char in[CHUNK];
-	unsigned char out[CHUNK];
-
 	// Header array to read the dms header
 	unsigned char header[64];
 
@@ -1158,6 +1190,10 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 	// Type of disk in this archive
 	unsigned short dmsdisktype = 0;
 
+	// Struct to store dms time
+	struct tm *dmstime;
+	dmstime = malloc(sizeof(struct tm));
+
 	// Crunchmode used
 	unsigned short dmscrunchmode = 0;
 
@@ -1166,7 +1202,6 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 
 	// Timestamp integer
 	time_t dmstimestamp = 0;
-	time_t origstamp = 0;
 
 	// Track header variables
 	unsigned int trackcurrent = 0;
@@ -1187,21 +1222,11 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 	// Pointer to the current buffer
 	unsigned char *buffer;
 
-	// Time struct
-	struct tm *tm;
-	tm = malloc(sizeof(struct tm));
-
 	// String to print time
 	char timestring[80];
 
 	// Temporary loop variable
 	int i=0;
-
-	// Use strptime to get epoch time at 1978-01-01 00:00:00, we'll use this later to get the right timestamp for the DMS file
-	if ( strptime("1978-01-01 00:00:00","%Y-%m-%d %H:%M:%S",tm) != NULL) {
-		//  Write timestamp at January 1st 1978 into origstamp
-		origstamp=mktime(tm);
-	} 
 
 	// Open input and output files
 	if(inputfile != NULL) {
@@ -1262,7 +1287,7 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 				fprintf(debugfile,"DMS banner exists in file\n");
 			
 			// File is high density file...
-			if((infobits & DMS_HIGHDENSITY) && endsector < 3520) {
+			if((infobits & DMS_HIGHDENSITY) && endsector < MAX_SECTORS) {
 				fprintf(stderr,"File is high density and endsector is less than 3520\n");
 				return NULL;
 			}
@@ -1281,17 +1306,11 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 			if((infobits & DMS_FILEIDBIZ) && debug)
 				fprintf(debugfile,"DMS FILE.ID_BIZ bit is set\n");
 
-			// Get timestamp (Amiga seconds since 1. jan 1978)
+			// Get amiga timestamp from header (Amiga seconds since 1. jan 1978)
 			dmstimestamp=(time_t)(header[8]<<24)+(header[9]<<16)+(header[10]<<8)+header[11];	
 
-			// Add to the origstampto get epoch time
-			origstamp += dmstimestamp;
-
-			// Make tm struct from timestamp
-			tm = localtime(&origstamp);
-
-			// Convert it into a date and time
-			strftime(timestring,80,"%c",tm); 
+			// Convert DMS timestring into epoch, and then to a valid timestring
+			strftime(timestring,80,"%c",amigatoepoch(dmstimestamp,dmstime));
 
 			if(debug)
 				fprintf(debugfile,"File created %s\n",timestring);
@@ -1754,6 +1773,8 @@ FILE *undmsfile(char *inputfile,int endsector, unsigned int debug, FILE *debugfi
 	fclose(infile);
 	// Seek to 0 in the temporary file before returning
 	rewind(outfile);
+	// Free time struct
+	free(dmstime);
 	//  Return filepointer
 	return outfile;
 } // End function undmsfile
@@ -1778,12 +1799,29 @@ int main(int argc,char **argv) {
 	char *extension;
 	/* Generate a array of strings to store the filepath and each directory name used in it */
 	char **filepath;
+	// We also need three arrays of uint32_t to store the days, minutes and ticks timestamps of the directories
+	uint32_t days[MAX_PATH_DEPTH];
+	uint32_t minutes[MAX_PATH_DEPTH];
+	uint32_t ticks[MAX_PATH_DEPTH];
 	// Array to keep track of orphaned sectors
 	int *orphansector;
 	// Array to keep track of orphan filenames
 	char **orphanfilename;
+	// Arrays to keep track of days, minutes and tick for orphans
+	uint32_t orphandays[MAX_SECTORS];
+	uint32_t orphanminutes[MAX_SECTORS];
+	uint32_t orphanticks[MAX_SECTORS];
+	// Variables to temporarily store orphandays, minutes and ticks
+	uint32_t orphanday = 0;
+	uint32_t orphanminute = 0;
+	uint32_t orphantick = 0;
+	// Time struct to store access and mod times
+	struct utimbuf *utim;
+	utim=malloc(sizeof(struct utimbuf));
 	// A string to store the previous filepath, used for orphaned files
 	char previousfilepath[MAX_FILENAME_LENGTH] = "";
+	// Strings for orphan string splitting
+	char *orphansplit = malloc(MAX_FILENAME_LENGTH +1 * sizeof(char *));
 	/* A integer to store the root and orphan directories */
 	int root = 0; int orphandir = 0;
 	/* A integer to hold the start sector, defaults to the defined value FIRST_SECTOR */
@@ -1796,6 +1834,8 @@ int main(int argc,char **argv) {
         int optionflag; int index = 0;
 	// File descriptor used either for the outfile, or set as stdout
         FILE *outfile = NULL;
+	// Boolean to check whether system is big or little endian
+	short bigendian = 1;
 	// Allocate space for filename and extension
 	filename = malloc(MAX_FILENAME_LENGTH + 1 * sizeof(char *));
 	extension = malloc(MAX_FILENAME_LENGTH + 1 * sizeof(char *));
@@ -1815,22 +1855,30 @@ int main(int argc,char **argv) {
 		}
 		snprintf(filepath[i],MAX_AMIGADOS_FILENAME_LENGTH,"");
 	}
-	// Alloc and init the orphanfilename array
-	orphanfilename = malloc(3520 * sizeof(char *));
-	for(i = 0; i<3520; i++) {
+	// Alloc and init the orphanfilename array as well as the orphan day, minutes, seconds array
+	orphanfilename = malloc(MAX_SECTORS * sizeof(char *));
+	for(i = 0; i<MAX_SECTORS; i++) {
 		orphanfilename[i] = malloc(MAX_FILENAME_LENGTH * sizeof(char));
 		if(orphanfilename[i] == NULL) {
 			fprintf(stderr, "Out of memory\n");
 			return 1;
 		}
 		snprintf(orphanfilename[i],MAX_FILENAME_LENGTH,"");
+		orphandays[i] = 0;
+		orphanminutes[i] = 0;
+		orphanticks[i] = 0;
 	}
 	
 	// Malloc and init Init the orphansector array, all sectors are not orphans to start with
-	orphansector = malloc(3520 * sizeof(*orphansector));
-	for(i = 0; i<3520 ; i++) {
+	orphansector = malloc(MAX_SECTORS * sizeof(*orphansector));
+	for(i = 0; i<MAX_SECTORS ; i++) {
 		orphansector[i]=0;
 	}
+
+	// Check for endianness
+	uint8_t swaptest[2] = {1,0};
+	if ( *(short *)swaptest == 1) 
+    		bigendian = 0;
 
 	// Read the passed options if any (-d sets debug, -o sets an optional filename to pipe the output to)
         while((optionflag = getopt(argc, argv, "adzDo:s:e:")) != -1) 
@@ -2065,6 +2113,17 @@ int main(int argc,char **argv) {
 				while(n >= 0) {
 					// Add the current filename to the array of paths
 					snprintf(filepath[j],MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[n].fh.filename);
+					//  Also store days, minutes and ticks to recreate the correct date and time of the files
+					if(bigendian) {
+						days[j] = sector[n].fh.days;
+						minutes[j] = sector[n].fh.mins;
+						ticks[j] = sector[n].fh.ticks;
+					} else { 
+						days[j] = ntohl(sector[n].fh.days);
+						minutes[j] = ntohl(sector[n].fh.mins);
+						ticks[j] = ntohl(sector[n].fh.ticks);
+					}
+					
 					if(debug) {
 						fprintf(outfile,"N: %d I: %d J: %d Current object is %s\n",n,i,j,sector[n].fh.filename);
 						fprintf(outfile,"Parent object is %s\n",sector[ntohl(sector[n].fh.parent)].fh.filename);
@@ -2117,6 +2176,8 @@ int main(int argc,char **argv) {
 					} else {
 						if(debug)
 							fprintf(outfile,"Created directory %s\n",filepath[n]);
+						// Set correct timestamp for directory
+						utime(filepath[n],amigadaystoutimbuf(days[n],minutes[n],ticks[n],utim));
 						// Change directory to the newly created directory
 						if(chdir(filepath[n]) == -1) {
 							// There is a chance, there's a filename that's the same as the name of the directory we're trying to create, in that case this is most likely
@@ -2134,6 +2195,8 @@ int main(int argc,char **argv) {
 							} else {
 								if(debug)
 									fprintf(outfile,"Created Orphaned directory %s\n",filepath[n]);
+								// Set correct timestamp for directory
+								utime(filepath[n],amigadaystoutimbuf(days[n],minutes[n],ticks[n],utim));
 								// Change directory to the newly created directory
 								if(chdir(filepath[n]) == -1) {
 									fprintf(stderr,"Can't change to newly created directory, exiting\n");
@@ -2155,6 +2218,13 @@ int main(int argc,char **argv) {
 					// Make a directory for this entry instead
 					if(mkdir(sector[i].fh.filename,0777) < 0 && errno != EEXIST) 
 						fprintf(stderr,"Can't create directory %s\n",sector[i].fh.filename);
+					else {
+						if(bigendian)
+							// Set correct timestamp for directory
+							utime(sector[i].fh.filename,amigadaystoutimbuf(sector[i].fh.days,sector[i].fh.mins,sector[i].fh.ticks,utim));
+						else
+							utime(sector[i].fh.filename,amigadaystoutimbuf(ntohl(sector[i].fh.days),ntohl(sector[i].fh.mins),ntohl(sector[i].fh.ticks),utim));
+					}
 				} else {
 					// Make a file for this entry (empty)
 					f = fopen(sector[i].fh.filename, "r+"); /* try to open existing file, if it already exists we won't need to creqte it */
@@ -2162,6 +2232,12 @@ int main(int argc,char **argv) {
 						f = fopen(sector[i].fh.filename, "w"); /* doesn't exist, so create */
 					// Close the file again
 					fclose(f);
+					// Modify the timestamp
+					if(bigendian)
+						// Set correct timestamp for directory
+						utime(sector[i].fh.filename,amigadaystoutimbuf(sector[i].fh.days,sector[i].fh.mins,sector[i].fh.ticks,utim));
+					else
+						utime(sector[i].fh.filename,amigadaystoutimbuf(ntohl(sector[i].fh.days),ntohl(sector[i].fh.mins),ntohl(sector[i].fh.ticks),utim));
 				}
 				// Return to the previous working directory
 				if(fchdir(root) == -1) {
@@ -2190,11 +2266,19 @@ int main(int argc,char **argv) {
 						fprintf(outfile,"%x:  filename  \"%s\"\n", i, sector[header_key].fh.filename);
 						fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[header_key].fh.byte_size));
 					}
+					// Defaults for days, minutes, ticks if nothing else is readable, date will be set as 1978-01-01 
+					orphanday = 0;
+					orphanminute = 0;
+					orphantick = 0; 
 					// Check whether we've come across this orphaned file before and given it a name, if so we'll keep that name so that we don't write to many different files
 					if(orphansector[header_key]) {
 						// Fetch the filename from the orphanfilename array
 						snprintf(filename,MAX_FILENAME_LENGTH,"%s",orphanfilename[header_key]);
-						// Mark this file as an orphan so it gets placed in the root directory
+						// Fetch days, minutes, ticks from orphandays/minutes/ticks arrays
+						orphanday=orphandays[header_key];
+						orphanminute=orphanminutes[header_key];
+						orphantick=orphanticks[header_key];
+						// Mark this file as an orphan so it gets placed in the Orphaned directory
 						orphan=1;
 						if(debug) 
 							fprintf(outfile,"This orphan already has a filename selected, it is %s\n",filename);
@@ -2228,29 +2312,79 @@ int main(int argc,char **argv) {
 						} else {
 							invalidparentstring=1;
 						}
+
+					
 						
 						// If the filename string is good and the parent string is good, we'll use both (only one parent used here)
 						if(!invalidstring && !invalidparentstring) {
 							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename,sector[header_key].fh.filename);
+							// Store days, minutes, ticks from file since it's available
+							if(bigendian) {
+								orphandays[header_key] = sector[header_key].fh.days;
+								orphanminutes[header_key] = sector[header_key].fh.mins;
+								orphanticks[header_key] = sector[header_key].fh.ticks;
+								orphanday = sector[header_key].fh.days;
+								orphanminute = sector[header_key].fh.mins;
+								orphantick = sector[header_key].fh.ticks;
+							} else {
+								orphandays[header_key] = ntohl(sector[header_key].fh.days);
+								orphanminutes[header_key] = ntohl(sector[header_key].fh.mins);
+								orphanticks[header_key] = ntohl(sector[header_key].fh.ticks);
+								orphanday = ntohl(sector[header_key].fh.days);
+								orphanminute = ntohl(sector[header_key].fh.mins);
+								orphantick = ntohl(sector[header_key].fh.ticks);
+							}
 							if(ntohl(sector[header_key].fh.parent) == 880) {
 								fprintf(outfile,"Parent er 880\n");
 							}
 						// Otherwise, if the filename string is good, but the parent string is not, we'll use that
 						} else if(!invalidstring) {
 							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,sector[header_key].fh.filename);
+							// Store days, minutes, ticks from file since it's available
+							if(bigendian) {
+								orphandays[header_key] = sector[header_key].fh.days;
+								orphanminutes[header_key] = sector[header_key].fh.mins;
+								orphanticks[header_key] = sector[header_key].fh.ticks;
+								orphanday = sector[header_key].fh.days;
+								orphanminute = sector[header_key].fh.mins;
+								orphantick = sector[header_key].fh.ticks;
+							} else {
+								orphandays[header_key] = ntohl(sector[header_key].fh.days);
+								orphanminutes[header_key] = ntohl(sector[header_key].fh.mins);
+								orphanticks[header_key] = ntohl(sector[header_key].fh.ticks);
+								orphanday = ntohl(sector[header_key].fh.days);
+								orphanminute = ntohl(sector[header_key].fh.mins);
+								orphantick = ntohl(sector[header_key].fh.ticks);
+							}
 						// Otherwise, if the parent filepath is good, we'll use that
 						} else if(!invalidparentstring) {
 							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename);
+							// Store days, minutes, ticks from parent since that's all we have
+							if(bigendian) {
+								orphandays[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.days;
+								orphanminutes[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.mins;
+								orphanticks[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.ticks;
+								orphanday = sector[ntohl(sector[header_key].fh.parent)].fh.days;
+								orphanminute = sector[ntohl(sector[header_key].fh.parent)].fh.mins;
+								orphantick = sector[ntohl(sector[header_key].fh.parent)].fh.ticks;
+							} else {
+								orphandays[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.days);
+								orphanminutes[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.mins);
+								orphanticks[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.ticks);
+								orphanday = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.days);
+								orphanminute = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.mins);
+								orphantick = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.ticks);
+							}
 						// Otherwise, if the previous filepath is good, we'll use that instead of the parent
 						} else if(strlen(previousfilepath) > 0) {
-							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,previousfilepath);
+							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%s-%s",previousfilepath,previousfilepath);
 						// Else we'll have to settle for just the header key value to identify the file since both the filename and parent filename strings are corrupt
 						} else {
-							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d",header_key);
+							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%d",header_key,header_key);
 						}
 						// Set the orphan flag to 1
 						orphan = 1;
-						// Mark this sector as an orphan so if we come across it again we'll use the same filename
+						// Mark this sector as an orphan so if we come across it again we'll use the same filename and dates
 						orphansector[header_key] = 1;
 						// And set the orphan filename to our current filename
 						snprintf(orphanfilename[header_key],MAX_FILENAME_LENGTH,"%s",filename);
@@ -2279,6 +2413,16 @@ int main(int argc,char **argv) {
 						snprintf(filepath[j],MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[ntohl(sector[n].fh.parent)].fh.filename);
 						if(debug)
 							fprintf(outfile,"File belongs to Directory tree %d, found path %s\n",j,filepath[j]);
+						//  Also store days, minutes and ticks to recreate the correct date and time of the files
+						if(bigendian) {
+							days[j] = sector[n].fh.days;
+							minutes[j] = sector[n].fh.mins;
+							ticks[j] = sector[n].fh.ticks;
+						} else { 
+							days[j] = ntohl(sector[n].fh.days);
+							minutes[j] = ntohl(sector[n].fh.mins);
+							ticks[j] = ntohl(sector[n].fh.ticks);
+						}
 						// Set n as the parent to recurse backwards
 					 	n = ntohl(sector[n].fh.parent);
 						// If the parent is the root sector we don't need more iterations	
@@ -2339,6 +2483,8 @@ int main(int argc,char **argv) {
 					if(staterr != -1 && S_ISDIR(st.st_mode) && !orphan) {
 						if(debug)
 							fprintf(outfile,"Directory %s already exists, not creating\n",filepath[n]);
+						// Set correct timestamp for directory
+						utime(filepath[n],amigadaystoutimbuf(days[n],minutes[n],ticks[n],utim));
 						if(chdir(filepath[n])) 
 							fprintf(outfile,"Can't CD to directory %s\n",filepath[n]);
 						else
@@ -2365,6 +2511,8 @@ int main(int argc,char **argv) {
 						} else {
 							if(debug)
 								fprintf(outfile,"Created directory %s in place of file\n",filepath[n]);
+							// Set correct timestamp for directory
+							utime(filepath[n],amigadaystoutimbuf(days[n],minutes[n],ticks[n],utim));
 							if(chdir(filepath[n])) {;
 								fprintf(stderr,"Can't change to newly created directory, exiting\n");
 								return 1;
@@ -2381,6 +2529,8 @@ int main(int argc,char **argv) {
 						} else {
 							if(debug)
 								fprintf(outfile,"Created directory %s\n",filepath[n]);
+							// Set correct timestamp for directory
+							utime(filepath[n],amigadaystoutimbuf(days[n],minutes[n],ticks[n],utim));
 							// Change directory to the newly created directory
 							if(chdir(filepath[n]) == -1) {
 								fprintf(stderr,"Can't change to newly created directory, exiting\n");
@@ -2399,39 +2549,41 @@ int main(int argc,char **argv) {
 				// If this is an orphan file we'll need to treat it a little differently, we can't fully recreate the path but we most likely have at least the parent directory
 				if(orphan) {
 					// Split the file 
-					// Char points for the split string as well as the original filename
-					char *split;
-					split = malloc(MAX_FILENAME_LENGTH);
-					char *filenamecopy;
-					filenamecopy = malloc(MAX_AMIGADOS_FILENAME_LENGTH);
+					// Temporary variable for strsep
+					char *orphanfilenamecopy = malloc(MAX_FILENAME_LENGTH*sizeof(char *));
+					char *temp;
 					// Copy the filename into the copy
-					snprintf(filenamecopy,MAX_AMIGADOS_FILENAME_LENGTH,"%s",filename);
+					snprintf(orphanfilenamecopy,MAX_FILENAME_LENGTH,"%s",filename);
 					// Variable to hold number of splits in the string
 					int splits=0;
+					// Store orphansplit before going into function
+					temp=orphansplit;
 					// Use strsep to split the string by -  (Orphan, Sector, Parent if there was a parent)
-					while((split = strsep(&filenamecopy,"-")) != NULL && splits <2) {
+					while((orphansplit = strsep(&orphanfilenamecopy,"-")) != NULL && splits <2) {
 						splits++;
 					}
 					// If there are 3 parts to the filename, there is a path component which either the last directory traversed or the parent directory of the orphaned file
 					// then we can place the file in that path, making it easier to sort out which orphans belong in which directory (and therefore, what could be in the file)
 					if(splits == 2) {
-						// Return to the root directory first
+						// Return to the orphaned directory first
 						if(fchdir(orphandir) == -1) {
 							fprintf(stderr,"Can't return to previous working directory, exiting\n");
 							return 1;
 						}
 						// Create a directory based on the path component of the oprhan
-						if(mkdir(split,0777) < 0 && errno != EEXIST) {
-							fprintf(stderr,"Can't create directory %s\n",split);
+						if(mkdir(orphansplit,0777) < 0 && errno != EEXIST) {
+							fprintf(stderr,"Can't create directory %s\n",orphansplit);
 						} else {
 							if(debug)
-								fprintf(outfile,"Created orphan directory %s\n",split);
+								fprintf(outfile,"Created orphan directory %s\n",orphansplit);
+							// Set modification time
+							//utime(orphansplit,amigadaystoutimbuf(orphanday,orphanminute,orphantick,utim));
 							// Change directory to the newly created directory
-							if(chdir(split) == -1) {
+							if(chdir(orphansplit) == -1) {
 								fprintf(stderr,"Can't change to newly created directory,placing orphan in the root directory");
 							} else 
 								if(debug)
-									fprintf(outfile,"Changing directory to orphaned %s\n",split);
+									fprintf(outfile,"Changing directory to orphaned %s\n",orphansplit);
 						}
 					} else {
 						// Return to the previous working directory and place the file in the root
@@ -2440,7 +2592,12 @@ int main(int argc,char **argv) {
 							return 1;
 						}
 					}
+					// Restore orphansplit
+					orphansplit=temp;
+					// Free memory used by orphanfilenamecopy
+					free(orphanfilenamecopy);
 				}
+
 					
 					
 				// Open the file for appending (in the current directory with the path intact)
@@ -2490,7 +2647,14 @@ int main(int argc,char **argv) {
 				if(debug)
 					fprintf(outfile,"seek to %ld\n",  (ntohl(sector[i].hdr.seq_num)-1)*DATABYTES);
 				fwrite(sector[i].dh.data, ntohl(sector[i].hdr.data_size), 1, f);
+				// Close file
 				fclose(f);
+				// Set modification time based on the days/minutes/ticks timestamp of the original file
+				if(bigendian) 
+					utime(filename,amigadaystoutimbuf(sector[header_key].fh.days,sector[header_key].fh.mins,sector[header_key].fh.ticks,utim));
+				else
+					//All the stamps are in big-endian so need to be converted..
+					utime(filename,amigadaystoutimbuf(ntohl(sector[header_key].fh.days),ntohl(sector[header_key].fh.mins),ntohl(sector[header_key].fh.ticks),utim));
 				// Return to the previous working directory
 				if(fchdir(root) == -1) {
 					fprintf(stderr,"Can't return to previous working directory, exiting\n");
@@ -2523,6 +2687,13 @@ int main(int argc,char **argv) {
 	// Free the space used by the sector array
 	free(sector);
 
+	// Free the time struct
+	free(utim);
+
+	// Free the orphansplit
+	free(orphansplit);
+
 	// Successful run	
 	return 0;
+	fprintf(stderr,"ermahgerdus\n");
 }
