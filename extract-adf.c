@@ -46,6 +46,8 @@
  * Added commandline option to force treating file as a DMS file
  * Added function to automagically determine format from file extension
  * Added support for re-creating original file timestamps 
+ * Added support to detect endianness and checks to not convert msb to lsb if we're running on a big endian system
+ *       it should therefore now be possible to compile and use this on a bigendian machine, if you try it, tell me about it
  * Fixed some minor bugs
  *
  * TODO:
@@ -2091,23 +2093,42 @@ int main(int argc,char **argv) {
 
 	// Loop through the sectors we are supposed to read and recover the data
 	for (i=startsector; i<endsector; i++) {
-		type = ntohl(sector[i].hdr.type);
+		if(bigendian)
+			type = sector[i].hdr.type;
+		else
+			type = ntohl(sector[i].hdr.type);
 		if (type != T_HEADER && type != T_DATA && type != T_LIST)
 			continue;
 		if(debug) {
-			fprintf(outfile,"%x: type       %x\n", i, ntohl(sector[i].hdr.type));
-			fprintf(outfile,"%x: header_key %x\n", i, ntohl(sector[i].hdr.header_key));
-			fprintf(outfile,"%x: seq_num    %x\n", i, ntohl(sector[i].hdr.seq_num));
-			fprintf(outfile,"%x: data_size  %x\n", i, ntohl(sector[i].hdr.data_size));
-			fprintf(outfile,"%x: next_data  %x\n", i, ntohl(sector[i].hdr.next_data));
-			fprintf(outfile,"%x: chksum     %x\n", i, ntohl(sector[i].hdr.chksum));
+			if(bigendian) {
+				fprintf(outfile,"%x: type       %x\n", i, sector[i].hdr.type);
+				fprintf(outfile,"%x: header_key %x\n", i, sector[i].hdr.header_key);
+				fprintf(outfile,"%x: seq_num    %x\n", i, sector[i].hdr.seq_num);
+				fprintf(outfile,"%x: data_size  %x\n", i, sector[i].hdr.data_size);
+				fprintf(outfile,"%x: next_data  %x\n", i, sector[i].hdr.next_data);
+				fprintf(outfile,"%x: chksum     %x\n", i, sector[i].hdr.chksum);
+			} else {
+				fprintf(outfile,"%x: type       %x\n", i, ntohl(sector[i].hdr.type));
+				fprintf(outfile,"%x: header_key %x\n", i, ntohl(sector[i].hdr.header_key));
+				fprintf(outfile,"%x: seq_num    %x\n", i, ntohl(sector[i].hdr.seq_num));
+				fprintf(outfile,"%x: data_size  %x\n", i, ntohl(sector[i].hdr.data_size));
+				fprintf(outfile,"%x: next_data  %x\n", i, ntohl(sector[i].hdr.next_data));
+				fprintf(outfile,"%x: chksum     %x\n", i, ntohl(sector[i].hdr.chksum));
+			}
 		}
 		switch (type) {
 			case T_HEADER:
-				header_key=ntohl(sector[i].hdr.header_key);
+				if(bigendian)
+					header_key=sector[i].hdr.header_key;
+				else
+					header_key=ntohl(sector[i].hdr.header_key);
 				if(debug) {
 					fprintf(outfile,"%x:  filename  \"%s\"\n", i, sector[i].fh.filename);
-					fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[i].fh.byte_size));
+					if(bigendian) 
+						fprintf(outfile,"%x:  byte_size %d\n", i, sector[i].fh.byte_size);
+					else 
+						fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[i].fh.byte_size));
+					
 				}
 				// Set n here as the header key of the current sector, we'll use it to find all parent headers so we can re-create the directory structure of the disk
 				n=i;
@@ -2129,7 +2150,10 @@ int main(int argc,char **argv) {
 					
 					if(debug) {
 						fprintf(outfile,"N: %d I: %d J: %d Current object is %s\n",n,i,j,sector[n].fh.filename);
-						fprintf(outfile,"Parent object is %s\n",sector[ntohl(sector[n].fh.parent)].fh.filename);
+						if(bigendian)
+							fprintf(outfile,"Parent object is %s\n",sector[sector[n].fh.parent].fh.filename);
+						else
+							fprintf(outfile,"Parent object is %s\n",sector[ntohl(sector[n].fh.parent)].fh.filename);
 					}
 					// If the current path is the root sector we don't need more iterations	
 					if(n == 880) {
@@ -2144,7 +2168,10 @@ int main(int argc,char **argv) {
 						j++;
 					}
 					// Set n as the parent to recurse backwards
-					n = ntohl(sector[n].fh.parent);
+					if(bigendian)
+						n = sector[n].fh.parent;
+					else
+						n = ntohl(sector[n].fh.parent);
 				}
 				// We should now have an array of all the filepaths belonging to this header, we'll now re-create all the directories in that path (we might do this multiple times for the top level directories but there is no harm in that)
 				// Open the current directory so we can return to it later
@@ -2217,7 +2244,7 @@ int main(int argc,char **argv) {
 				// First we check whether the entry is 0 bytes, if it is, then it's very likely that it's a directory entry and not a file entry
 				// If it really is a file entry, and it is 0 bytes, and it is orphaned, then we're out of luck, if the file is okay (even though it's 0 bytes), it will be created later 
 				// This should hopefully make the work of puzzling together the structure relatively easy
-				if(ntohl(sector[i].fh.byte_size) == 0) {
+				if(((ntohl(sector[i].fh.byte_size) == 0) && !bigendian) || (bigendian && (sector[i].fh.byte_size == 0))) {
 					// Make a directory for this entry instead
 					if(mkdir(sector[i].fh.filename,0777) < 0 && errno != EEXIST) 
 						fprintf(stderr,"Can't create directory %s\n",sector[i].fh.filename);
@@ -2253,13 +2280,19 @@ int main(int argc,char **argv) {
 				// Leave this sector
 				break;
 			case T_DATA:
-				if(ntohl(sector[i].hdr.header_key % 32 != 0))
+				if( (!bigendian && (ntohl(sector[i].hdr.header_key % 32 != 0))) || (bigendian && (sector[i].hdr.header_key % 32 != 0)))
 					continue;
-				header_key = ntohl(sector[i].hdr.header_key);
-				if (header_key<SECTORS && ntohl(sector[header_key].hdr.type) == T_HEADER) {
+				if(bigendian)
+					header_key = sector[i].hdr.header_key;
+				else
+					header_key = ntohl(sector[i].hdr.header_key);
+				if (header_key<SECTORS && ( (!bigendian && (ntohl(sector[header_key].hdr.type) == T_HEADER)) || (bigendian && (sector[header_key].hdr.type == T_HEADER)))) {
 					if(debug) {
 						fprintf(outfile,"%x:  filename  \"%s\"\n", i, sector[header_key].fh.filename);
-						fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[header_key].fh.byte_size));
+						if(bigendian)
+							fprintf(outfile,"%x:  byte_size %d\n", i, sector[header_key].fh.byte_size);
+						else
+							fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[header_key].fh.byte_size));
 					}
 					snprintf(filename,MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[header_key].fh.filename);
 					orphan = 0;
@@ -2267,7 +2300,10 @@ int main(int argc,char **argv) {
 					if(debug) {
 						fprintf(outfile,"Orphaned file found at header key %d previous orphansector value: %d\n",header_key,orphansector[header_key]);
 						fprintf(outfile,"%x:  filename  \"%s\"\n", i, sector[header_key].fh.filename);
-						fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[header_key].fh.byte_size));
+						if(bigendian)
+							fprintf(outfile,"%x:  byte_size %d\n", i, sector[header_key].fh.byte_size);
+						else
+							fprintf(outfile,"%x:  byte_size %d\n", i, ntohl(sector[header_key].fh.byte_size));
 					}
 					// Defaults for days, minutes, ticks if nothing else is readable, date will be set as 1978-01-01 
 					orphanday = 0;
@@ -2302,43 +2338,62 @@ int main(int argc,char **argv) {
 							invalidstring=1;
 						}
 						// Extra boundary check here to verify that we have a valid parent index, it's possible that the parent number is corrupt
-						if(sector[header_key].fh.parent && (sector[header_key].fh.parent % 32) == 0 && ntohl(sector[header_key].fh.parent) < endsector) {
-							// Check whether there are invalid characters in the parent filename string and mark it as invalid if there are
-							for(n=0;n<sizeof(sector[ntohl(sector[header_key].fh.parent)].fh.filename)/sizeof(sector[ntohl(sector[header_key].fh.parent)].fh.filename[0]);n++) {
-								if((((unsigned char)sector[ntohl(sector[header_key].fh.parent)].fh.filename[n] <32) && (unsigned char)sector[ntohl(sector[header_key].fh.parent)].fh.filename[n] > 0) || (unsigned char)sector[ntohl(sector[header_key].fh.parent)].fh.filename[n] ==47 || ((unsigned char)sector[ntohl(sector[header_key].fh.parent)].fh.filename[n] >127 && (unsigned char)sector[ntohl(sector[header_key].fh.parent)].fh.filename[n] < 161))
-									invalidparentstring=1;
-							}
-							// If the parent filename is longer than the max_filename_length or it's empty, then it's invalid
-							if(strlen(sector[ntohl(sector[header_key].fh.parent)].fh.filename) > MAX_AMIGADOS_FILENAME_LENGTH || strlen(sector[ntohl(sector[header_key].fh.parent)].fh.filename) == 0)
-								invalidparentstring=1;
-						// If there is no parent then we can't use that to construct the string
-						} else {
-							invalidparentstring=1;
-						}
-
+						if(bigendian) {
 					
+							if(sector[header_key].fh.parent && (sector[header_key].fh.parent % 32) == 0 && sector[header_key].fh.parent < endsector) {
+								// Check whether there are invalid characters in the parent filename string and mark it as invalid if there are
+								for(n=0;n<sizeof(sector[sector[header_key].fh.parent].fh.filename)/sizeof(sector[sector[header_key].fh.parent].fh.filename[0]);n++) {
+									if((((unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] <32) && (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] > 0) || (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] ==47 || ((unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] >127 && (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] < 161))
+										invalidparentstring=1;
+								}
+								// If the parent filename is longer than the max_filename_length or it's empty, then it's invalid
+								if(strlen(sector[sector[header_key].fh.parent].fh.filename) > MAX_AMIGADOS_FILENAME_LENGTH || strlen(sector[sector[header_key].fh.parent].fh.filename) == 0)
+									invalidparentstring=1;
+							// If there is no parent then we can't use that to construct the string
+							} else {
+								invalidparentstring=1;
+							}
+						} else {
+							if(sector[header_key].fh.parent && (sector[header_key].fh.parent % 32) == 0 && sector[header_key].fh.parent < endsector) {
+								// Check whether there are invalid characters in the parent filename string and mark it as invalid if there are
+								for(n=0;n<sizeof(sector[sector[header_key].fh.parent].fh.filename)/sizeof(sector[sector[header_key].fh.parent].fh.filename[0]);n++) {
+									if((((unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] <32) && (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] > 0) || (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] ==47 || ((unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] >127 && (unsigned char)sector[sector[header_key].fh.parent].fh.filename[n] < 161))
+										invalidparentstring=1;
+								}
+								// If the parent filename is longer than the max_filename_length or it's empty, then it's invalid
+								if(strlen(sector[sector[header_key].fh.parent].fh.filename) > MAX_AMIGADOS_FILENAME_LENGTH || strlen(sector[sector[header_key].fh.parent].fh.filename) == 0)
+									invalidparentstring=1;
+							// If there is no parent then we can't use that to construct the string
+							} else {
+								invalidparentstring=1;
+							}
+						}
 						
 						// If the filename string is good and the parent string is good, we'll use both (only one parent used here)
 						if(!invalidstring && !invalidparentstring) {
-							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename,sector[header_key].fh.filename);
 							// Store days, minutes, ticks from file since it's available
 							if(bigendian) {
+								snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s-%s",header_key,sector[sector[header_key].fh.parent].fh.filename,sector[header_key].fh.filename);
 								orphandays[header_key] = sector[header_key].fh.days;
 								orphanminutes[header_key] = sector[header_key].fh.mins;
 								orphanticks[header_key] = sector[header_key].fh.ticks;
 								orphanday = sector[header_key].fh.days;
 								orphanminute = sector[header_key].fh.mins;
 								orphantick = sector[header_key].fh.ticks;
+								if(sector[header_key].fh.parent == 880) {
+									fprintf(outfile,"Parent er 880\n");
+								}
 							} else {
+								snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename,sector[header_key].fh.filename);
 								orphandays[header_key] = ntohl(sector[header_key].fh.days);
 								orphanminutes[header_key] = ntohl(sector[header_key].fh.mins);
 								orphanticks[header_key] = ntohl(sector[header_key].fh.ticks);
 								orphanday = ntohl(sector[header_key].fh.days);
 								orphanminute = ntohl(sector[header_key].fh.mins);
 								orphantick = ntohl(sector[header_key].fh.ticks);
-							}
-							if(ntohl(sector[header_key].fh.parent) == 880) {
-								fprintf(outfile,"Parent er 880\n");
+								if(ntohl(sector[header_key].fh.parent) == 880) {
+									fprintf(outfile,"Parent er 880\n");
+								}
 							}
 						// Otherwise, if the filename string is good, but the parent string is not, we'll use that
 						} else if(!invalidstring) {
@@ -2361,9 +2416,9 @@ int main(int argc,char **argv) {
 							}
 						// Otherwise, if the parent filepath is good, we'll use that
 						} else if(!invalidparentstring) {
-							snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename);
 							// Store days, minutes, ticks from parent since that's all we have
 							if(bigendian) {
+								snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,sector[sector[header_key].fh.parent].fh.filename);
 								orphandays[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.days;
 								orphanminutes[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.mins;
 								orphanticks[header_key] = sector[ntohl(sector[header_key].fh.parent)].fh.ticks;
@@ -2371,6 +2426,7 @@ int main(int argc,char **argv) {
 								orphanminute = sector[ntohl(sector[header_key].fh.parent)].fh.mins;
 								orphantick = sector[ntohl(sector[header_key].fh.parent)].fh.ticks;
 							} else {
+								snprintf(filename, MAX_FILENAME_LENGTH,"Orphan-%d-%s",header_key,sector[ntohl(sector[header_key].fh.parent)].fh.filename);
 								orphandays[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.days);
 								orphanminutes[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.mins);
 								orphanticks[header_key] = ntohl(sector[ntohl(sector[header_key].fh.parent)].fh.ticks);
@@ -2393,11 +2449,17 @@ int main(int argc,char **argv) {
 						snprintf(orphanfilename[header_key],MAX_FILENAME_LENGTH,"%s",filename);
 						if(debug) {
 							if(!invalidstring && !invalidparentstring) {	
-								fprintf(outfile, "Filename:%s: Parent Filename: %s Orphan Filename: %s\n",sector[header_key].fh.filename,sector[ntohl(sector[header_key].fh.parent)].fh.filename,filename);
+								if(bigendian)
+									fprintf(outfile, "Filename:%s: Parent Filename: %s Orphan Filename: %s\n",sector[header_key].fh.filename,sector[sector[header_key].fh.parent].fh.filename,filename);
+								else
+									fprintf(outfile, "Filename:%s: Parent Filename: %s Orphan Filename: %s\n",sector[header_key].fh.filename,sector[ntohl(sector[header_key].fh.parent)].fh.filename,filename);
 							} else if(!invalidstring) {
 								fprintf(outfile, "Filename:%s: Orphan Filename: %s\n",sector[header_key].fh.filename,filename);
 							} else if(!invalidparentstring) {
-								fprintf(outfile, "Parent Filename: %s Orphan Filename: %s\n",sector[ntohl(sector[header_key].fh.parent)].fh.filename,filename);
+								if(bigendian)
+									fprintf(outfile, "Parent Filename: %s Orphan Filename: %s\n",sector[sector[header_key].fh.parent].fh.filename,filename);
+								else
+									fprintf(outfile, "Parent Filename: %s Orphan Filename: %s\n",sector[ntohl(sector[header_key].fh.parent)].fh.filename,filename);
 							} else if(strlen(previousfilepath) > 0) {
 								fprintf(outfile, "Previous filepath: %s Orphan Filename: %s\n",previousfilepath,filename);
 							} else {
@@ -2410,24 +2472,28 @@ int main(int argc,char **argv) {
 				// Find the file path and put it into the filepath array
 				j = 0; n=header_key;
 				// If this is a regular file (has a regular filename, and a directory structure) as well as a valid parent find the path
-				while( n != 0 && header_key<SECTORS && ntohl(sector[header_key].hdr.type) == T_HEADER && (sector[n].fh.parent % 32) == 0) {
+				while( n != 0 && header_key<SECTORS && ( (!bigendian && (ntohl(sector[header_key].hdr.type) == T_HEADER)) || (bigendian && (sector[header_key].hdr.type == T_HEADER))) && (sector[n].fh.parent % 32) == 0) {
 					if(sector[n].fh.parent && n != 880)  {
-						// Get the path entry name into the filepath array
-						snprintf(filepath[j],MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[ntohl(sector[n].fh.parent)].fh.filename);
-						if(debug)
-							fprintf(outfile,"File belongs to Directory tree %d, found path %s\n",j,filepath[j]);
 						//  Also store days, minutes and ticks to recreate the correct date and time of the files
 						if(bigendian) {
+							// Get the path entry name into the filepath array
+							snprintf(filepath[j],MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[sector[n].fh.parent].fh.filename);
 							days[j] = sector[n].fh.days;
 							minutes[j] = sector[n].fh.mins;
 							ticks[j] = sector[n].fh.ticks;
+							// Set n as the parent to recurse backwards
+							n = sector[n].fh.parent;
 						} else { 
+							// Get the path entry name into the filepath array
+							snprintf(filepath[j],MAX_AMIGADOS_FILENAME_LENGTH,"%s",sector[ntohl(sector[n].fh.parent)].fh.filename);
 							days[j] = ntohl(sector[n].fh.days);
 							minutes[j] = ntohl(sector[n].fh.mins);
 							ticks[j] = ntohl(sector[n].fh.ticks);
+							// Set n as the parent to recurse backwards
+							n = ntohl(sector[n].fh.parent);
 						}
-						// Set n as the parent to recurse backwards
-					 	n = ntohl(sector[n].fh.parent);
+						if(debug)
+							fprintf(outfile,"File belongs to Directory tree %d, found path %s\n",j,filepath[j]);
 						// If the parent is the root sector we don't need more iterations	
 						if(n == 880) {
 							if(debug)
@@ -2609,7 +2675,10 @@ int main(int argc,char **argv) {
 					f = fopen(filename, "w"); /* doesn't exist, so create */
 				if(!f) {
 					// File could already exist under the same name or even as a directory, try append the sector header to the filename and try again
-					snprintf(filename,MAX_AMIGADOS_FILENAME_LENGTH,"%s-%d",filename,ntohl(sector[i].hdr.header_key));
+					if(bigendian)
+						snprintf(filename,MAX_AMIGADOS_FILENAME_LENGTH,"%s-%d",filename,sector[i].hdr.header_key);
+					else
+						snprintf(filename,MAX_AMIGADOS_FILENAME_LENGTH,"%s-%d",filename,ntohl(sector[i].hdr.header_key));
 					f = fopen(filename, "w"); /* doesn't exist, so create */
 					if(!f) 
 						fprintf(stderr,"Can't create file, this is probably fatal!\n");
@@ -2644,12 +2713,26 @@ int main(int argc,char **argv) {
 					fprintf(outfile,"\n");
 				}
 				// Write the content to the file
-				if(debug)
-					fprintf(outfile,"Seek seq_num %02x : DATABYTES: %lu SEEKSET: %d \n",ntohl(sector[i].hdr.seq_num),DATABYTES,SEEK_SET);
-				fseek(f, (ntohl(sector[i].hdr.seq_num)-1)*DATABYTES, SEEK_SET);
-				if(debug)
-					fprintf(outfile,"seek to %ld\n",  (ntohl(sector[i].hdr.seq_num)-1)*DATABYTES);
-				fwrite(sector[i].dh.data, ntohl(sector[i].hdr.data_size), 1, f);
+				if(debug) {
+					if(bigendian)	
+						fprintf(outfile,"Seek seq_num %02x : DATABYTES: %lu SEEKSET: %d \n",sector[i].hdr.seq_num,DATABYTES,SEEK_SET);
+					else
+						fprintf(outfile,"Seek seq_num %02x : DATABYTES: %lu SEEKSET: %d \n",ntohl(sector[i].hdr.seq_num),DATABYTES,SEEK_SET);
+				}
+				if(bigendian)
+					fseek(f, (sector[i].hdr.seq_num-1)*DATABYTES, SEEK_SET);
+				else
+					fseek(f, (ntohl(sector[i].hdr.seq_num)-1)*DATABYTES, SEEK_SET);
+				if(debug) {
+					if(bigendian)
+						fprintf(outfile,"seek to %ld\n",  (sector[i].hdr.seq_num-1)*DATABYTES);
+					else
+						fprintf(outfile,"seek to %ld\n",  (ntohl(sector[i].hdr.seq_num)-1)*DATABYTES);
+				}
+				if(bigendian)
+					fwrite(sector[i].dh.data, sector[i].hdr.data_size, 1, f);
+				else 
+					fwrite(sector[i].dh.data, ntohl(sector[i].hdr.data_size), 1, f);
 				// Close file
 				fclose(f);
 				// Set modification time based on the days/minutes/ticks timestamp of the original file
