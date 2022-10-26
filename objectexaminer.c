@@ -41,7 +41,7 @@ Hunks
 
 The hunks are then in this format
 Hunk name (optional)
-Reloctable block (optioal)
+Relocatable block (optional)
 Relocation Information block (optional)
 External symbol information block, with one or more symbol table data entries (optional)
 Symbol table block, with one or more symbol table data entries (optional)
